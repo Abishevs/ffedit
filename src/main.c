@@ -20,6 +20,22 @@ typedef struct {
     size_t num_lines;   // ROW, 
 } TextBuffer;
 
+/*  Utilis */
+int get_last_row()
+{
+    return LINES - 2;
+}
+
+void set_block_cursor() {
+    printf("\e[2 q"); // Block cursor
+    fflush(stdout);
+}
+
+void set_thin_cursor() {
+    printf("\e[5 q"); // Thin cursor |
+    fflush(stdout);
+}
+
 int load_file_into_buffer(const char *file_name, TextBuffer *buf) 
 {
     // Try to open the file
@@ -85,17 +101,13 @@ const char *mode_to_str(Mode mode)
     }
 }
 
+
 // Try to open file Return NULL if not found
-void build_path(const char *file_name, char *path, int path_size)
+void build_path(char *file_name, char *argv)
 {
     // TODO: Add support for abs, ~ and  / paths
     // NOTE: Works rn for relative paths only
-    int length = sprintf(path, "./%s", file_name);
-
-    if ( length >= path_size) {
-        fprintf(stderr, "Path lenght exceeeds the limit\n");
-        exit(1);
-    }
+    int length = sprintf(file_name, "./%s", argv);
     printf("New string len: %d\n", length);
 }
 
@@ -137,7 +149,8 @@ int get_char_offset(TextBuffer *buf)
     return chars;
 }
 
-int delete_char(TextBuffer *buf) {
+int delete_char(TextBuffer *buf) 
+{
     if (buf->length == 0 || buf->col == 0) {
         return 0; // Nothing to delete
     }
@@ -188,23 +201,21 @@ int insert_char(TextBuffer *buf, char ch)
 
 
     buf->data[index] = ch;
-
     buf->length++;
-
-    // printf("length: %ld\n", buf->length);
-    // printf("Capacity: %ld\n", buf->capacity);
 
     return 1;
 }
 
-void set_block_cursor() {
-    printf("\e[2 q"); // Block cursor
-    fflush(stdout);
-}
-
-void set_thin_cursor() {
-    printf("\e[5 q"); // Thin cursor (|)
-    fflush(stdout);
+void setup_terminal()
+{
+    initscr(); // Cursor mode
+    raw();
+    noecho();
+    keypad(stdscr, TRUE);
+    scrollok(stdscr, FALSE); 
+    set_escdelay(25);     
+    nodelay(stdscr, FALSE);
+    clear();
 }
 
 void cleanup() {
@@ -216,17 +227,96 @@ void cleanup() {
 }
 
 
+void draw_ui(TextBuffer *buf, Mode mode)
+{
+        // Status Line
+        move(get_last_row(), 0);
+        clrtoeol();
+        int last_row = get_last_row();
+        mvprintw(last_row, 0,"%s", mode_to_str(mode)); 
+        mvprintw(last_row, strlen(mode_to_str(mode)) + 1, "%zu:", buf->row); 
+         // TODO: Make smarter function for printing row col, works with single
+         // digits only rn.
+        mvprintw(last_row, strlen(mode_to_str(mode)) + 3, "%zu", buf->col);  
+
+        // Command line
+        move(last_row + 1, 0);
+        clrtoeol();
+        mvprintw(last_row + 1, 0, ">");  
+}
+
+Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
+{
+    if (ch == KB_i) {
+        set_thin_cursor();
+        return INSERT;
+    } else if ( ch == ':' ) {
+        return COMMAND;
+    } else if (ch == 'h') { // Move left
+        if (buf->col > 0) {
+            buf->col--; // Ensure we don't go out of bounds
+        }
+
+    } else if (ch == 'l') { // Move right
+        if (buf->col < COLS - 1) {
+            buf->col++; // Ensure we stay within screen width
+        }
+
+    } else if (ch == 'j') { // Move down
+        if (buf->row + 1 < buf->num_lines ) buf->row++; // Ensure we stay within Status
+                                                        // TODO: find next \n then go col
+
+    } else if (ch == 'k') { // Move up
+        if (buf->row > 0) buf->row--; // Ensure we don't go above the top
+                                      // TODO: find prev \n then go col
+    }
+
+    return mode;
+
+}
+
+void handle_insert_mode(TextBuffer *buf, int ch)
+{
+    if (ch == '\n' || ch == KEY_ENTER || ch == '\r' || ch == 10) {
+        buf->row++;
+        insert_char(buf, ch);
+        buf->col = 0;
+    } else {
+        if ( ch == KEY_BACKSPACE || ch == 263 ) {
+            if ( buf->col > 0 ) {
+                delete_char(buf);
+                buf->col--;
+            }
+        } else {
+            insert_char(buf, ch);
+            buf->col++;
+        }
+    }
+}
+
+
+int handle_command_mode(TextBuffer *buf, int ch, const char *file_name, int quit)
+{
+    if ( ch == 'q' ){
+        return 1;
+    } else if ( ch == 'w' ) {
+        save_file(buf, file_name);
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char *argv[])
     // Argc hold num of args
     // argv is ptr to string passed in
     // Argv[0] = dir from which main called
 {
     // TODO: Dynamcly allocate mem for path?
-    char path[PATH_SIZE];
-    const char *file_name;
+    TextBuffer buf = {0}; 
+    char file_name[PATH_SIZE];
     Mode mode = NORMAL; // Start in normal mode
-    const char *status_line = mode_to_str(mode);
-
+    int ch;
+    int quit = 0;
 
     if (argc == 1) {
         // That means there are no arg passed in
@@ -235,123 +325,40 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    file_name = argv[1];
-    build_path(file_name, path, sizeof(path));
-    // FILE *fp = fopen(path, "r");
-
-    TextBuffer buf = {0}; 
+    build_path(file_name, argv[1]);
     load_file_into_buffer(file_name, &buf);
-
-    int ch;
-
-    initscr(); // Cursor mode
-    raw();
-    noecho();
-    keypad(stdscr, TRUE);
-    scrollok(stdscr, FALSE); 
-    clear();
-    set_escdelay(25);     
-    nodelay(stdscr, FALSE);
-
-    int quit = 0;
-    int last_row = LINES - 2;
+    setup_terminal();
 
     atexit(cleanup); // Register cleanup for when exit() called
-    
-    /*  Status line */
-    // mvprintw(last_row + 1, 0, "%s", status_line);  
-    // clrtoeol();                               // Clear to the end of the line
-    // last_row--; //  Comensite for status line.
 
     while (!quit) {
+        draw_ui(&buf, mode);
         render_text(&buf);
+        refresh();
         move(buf.row, buf.col); // Move cursor to start pos
+
         ch = getch(); // Blocking
         if (ch == KB_ESC) {
             mode = NORMAL;
             set_block_cursor();
         }
 
-        status_line = mode_to_str(mode);
         switch (mode) {
-            case NORMAL:
-                if (ch == KB_i) {
-                    mode = INSERT;
-                    set_thin_cursor();
-                } else if ( ch == ':' ) {
-                    mode = COMMAND;
-                } else if (ch == 'h') { // Move left
-                    if (buf.col > 0) {
-                        buf.col--; // Ensure we don't go out of bounds
-                    }
-                                        
-                } else if (ch == 'l') { // Move right
-                    if (buf.col < COLS - 1) {
-                        buf.col++; // Ensure we stay within screen width
-                    }
-                                               
-                } else if (ch == 'j') { // Move down
-                    if (buf.row + 1 < buf.num_lines ) buf.row++; // Ensure we stay within Status
-                    // TODO: find next \n then go col
-                                                
-                } else if (ch == 'k') { // Move up
-                    if (buf.row > 0) buf.row--; // Ensure we don't go above the top
-                    // TODO: find prev \n then go col
-                }
-
-                move(buf.row, buf.col);
+            case NORMAL: 
+                mode = handle_normal_mode(&buf, ch, mode);
                 break;
-
-            case INSERT:
-                if (ch == '\n' || ch == KEY_ENTER || ch == '\r' || ch == 10) {
-                    buf.row++;
-                    insert_char(&buf, ch);
-                    buf.col = 0;
-                    move(buf.row, buf.col);
-                    // printw("\n");
-                } else {
-                    if ( ch == KEY_BACKSPACE || ch == 263 ) {
-                        if ( buf.col > 0 ) {
-                            delete_char(&buf);
-                            buf.col--;
-                        }
-                    } else {
-                        insert_char(&buf, ch);
-                        buf.col++;
-                    }
-                    move(buf.row, buf.col);
-                    
-                }
-
+            case INSERT: 
+                handle_insert_mode(&buf, ch);
                 break;
-
             case COMMAND:
-                if ( ch == 'q' ){
-                    quit = 1;
-                    break;
-                } else if ( ch == 'w' ) {
-                    save_file(&buf, file_name);
-                    quit = 1;
-                    break;
-                }
+                quit = handle_command_mode(&buf, ch, file_name, quit);
+                break;
         }
-        // Updates Status Line
-        status_line = mode_to_str(mode);
-        clrtoeol();
-        mvprintw(last_row  , 0,"%s", status_line); 
-        mvprintw(last_row, strlen(status_line) + 1, "%zu:", buf.row); 
-         // TODO: Make smarter function for printing row col, works with single
-         // digits only rn.
-        mvprintw(last_row, strlen(status_line) + 3, "%zu", buf.col);  
-        // Command line
-        mvprintw(last_row + 1, 0, ">");  
-                                                                    
-        // move(buf.row, buf.col); // Moce cursor back
-        refresh();
+        move(buf.row, buf.col);
     }
 
 
-/*  Clean up */
+    /*  Clean up */
     cleanup();
     free(buf.data);
 
@@ -359,7 +366,6 @@ int main(int argc, char *argv[])
     printf("Terminal size: %d rows, %d cols\n", LINES, COLS);
     printf("Filename: %s\n", file_name);
     printf("Num of lines: %zu\n", buf.num_lines);
-    printf("Path to file: %s\n", path);
 
     
     return 0;
