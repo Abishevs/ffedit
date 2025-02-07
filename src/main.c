@@ -98,6 +98,7 @@ const char *mode_to_str(Mode mode)
         case NORMAL: return "NORMAL";
         case INSERT: return "INSERT";
         case COMMAND: return "COMMAND";
+        default: return "INVALID CMD";
     }
 }
 
@@ -115,6 +116,11 @@ void render_text(TextBuffer *buf)
 {
     int row = 0, col = 0;
     buf->num_lines = 0;
+
+    for (int row = 0; row < LINES - 2; row++){
+            move(row, 0);
+            clrtoeol();
+    }
     
     for (size_t i = 0; i < buf->length; i++) {
         if (buf->data[i] == '\n') {
@@ -122,7 +128,6 @@ void render_text(TextBuffer *buf)
             col = 0; // Reset column at newline
             buf->num_lines++;
         } else {
-            clrtoeol();
             mvaddch(row, col, buf->data[i]);  // Draw character
             col++;
             if (col >= COLS) { // Wrap to next line if screen width is exceeded
@@ -138,11 +143,11 @@ void render_text(TextBuffer *buf)
 
 int get_char_offset(TextBuffer *buf)
 {
-    int prev_line = 0;
+    int prev_lines = 0;
     int chars = 0;
-    while (buf->row - prev_line > 0) {
+    while (buf->row - prev_lines > 0) {
         if (buf->data[chars] == '\n') {
-            prev_line++;
+            prev_lines++;
         }
         chars++;
     }
@@ -151,11 +156,11 @@ int get_char_offset(TextBuffer *buf)
 
 int delete_char(TextBuffer *buf) 
 {
-    if (buf->length == 0 || buf->col == 0) {
-        return 0; // Nothing to delete
-    }
-
     size_t index = buf->col + get_char_offset(buf);
+
+    if (buf->length == 0 ) {
+        return 0; // Nothing to delete
+    } 
 
     char *tmp_ptr = realloc(buf->data, buf->capacity - 1);
     if (tmp_ptr == NULL) {
@@ -229,20 +234,52 @@ void cleanup() {
 
 void draw_ui(TextBuffer *buf, Mode mode)
 {
-        // Status Line
-        move(get_last_row(), 0);
-        clrtoeol();
-        int last_row = get_last_row();
-        mvprintw(last_row, 0,"%s", mode_to_str(mode)); 
-        mvprintw(last_row, strlen(mode_to_str(mode)) + 1, "%zu:", buf->row); 
-         // TODO: Make smarter function for printing row col, works with single
-         // digits only rn.
-        mvprintw(last_row, strlen(mode_to_str(mode)) + 3, "%zu", buf->col);  
+    int last_row = get_last_row();
+    char *row_col_str = malloc(4);
+    
+    if (row_col_str == NULL) {
+        //TODO: Handle Allocation error
+        exit(1);
+    }
+    int row_col_len;
+    row_col_len = sprintf(row_col_str, "%zu:%zu", buf->row, buf->col);
 
+    if (row_col_len > 3) {
+        row_col_str = realloc(row_col_str, row_col_len + 1); //+1 NULL terminator
+        if (row_col_str == NULL) {
+            //TODO: Handle Realloction error
+            exit(1);
+        }
+    }
+
+    // Status Line
+    move(last_row, 0);
+    clrtoeol();
+    // Left
+    start_color(); //WARN: Should be checked with
+                   //has_colors() if term supports colors
+                   
+    init_pair(1, COLOR_BLACK, COLOR_CYAN);
+	attron(COLOR_PAIR(1));
+
+    for (int col = 0; col < COLS; col++){
+        mvprintw(last_row, col," "); 
+    }
+    mvprintw(last_row, 1,"%s", mode_to_str(mode)); 
+
+    // Right
+    mvprintw(last_row, COLS - 1 - row_col_len, "%s", row_col_str); 
+    attroff(COLOR_PAIR(1));
+
+
+    if (mode == COMMAND){
         // Command line
         move(last_row + 1, 0);
         clrtoeol();
-        mvprintw(last_row + 1, 0, ">");  
+        mvprintw(last_row + 1, 0, ":");  
+    }
+
+    free(row_col_str);
 }
 
 Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
@@ -278,14 +315,22 @@ Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
 void handle_insert_mode(TextBuffer *buf, int ch)
 {
     if (ch == '\n' || ch == KEY_ENTER || ch == '\r' || ch == 10) {
-        buf->row++;
         insert_char(buf, ch);
+        buf->row++;
         buf->col = 0;
     } else {
         if ( ch == KEY_BACKSPACE || ch == 263 ) {
-            if ( buf->col > 0 ) {
+            if (buf->col > 0) {
                 delete_char(buf);
                 buf->col--;
+            } else if (buf->row > 0) {
+                delete_char(buf);
+                buf->col = 0;
+                buf->row--;
+                // TODO: calc the right Col pos
+                // when deleting a lankline to jmp
+                // to correct prev line last col
+
             }
         } else {
             insert_char(buf, ch);
@@ -294,29 +339,79 @@ void handle_insert_mode(TextBuffer *buf, int ch)
     }
 }
 
-
-int handle_command_mode(TextBuffer *buf, int ch, const char *file_name, int quit)
+void cmd_parser(TextBuffer *buf, char *tmp_buf, const char *file_name, int *quit)
 {
-    if ( ch == 'q' ){
-        return 1;
-    } else if ( ch == 'w' ) {
-        save_file(buf, file_name);
-        return 1;
+        if ( tmp_buf[0] == 'w' && tmp_buf[1] == 'q' ){
+            save_file(buf, file_name);
+           *quit = 1;
+        } else if (tmp_buf[0] == 'q' ) {
+            *quit = 1;
+        } else if (tmp_buf[0] == 'w' ) {
+            save_file(buf, file_name);
+            int str_len = sprintf(tmp_buf,"'%s', %zuL, %zuB written",file_name, buf->num_lines, buf->length);
+            //WARN: Reallocate aka look at size of the str
+        }
+}
+
+Mode handle_command_mode(TextBuffer *buf, int ch, const char *file_name, int *quit)
+{
+    size_t capacity = 16;
+    char *tmp_buf = malloc(capacity);
+    if (!tmp_buf) return NORMAL;
+
+    size_t buf_len = 0;
+    int col = 1;
+    int row = get_last_row() + 1;
+    refresh();
+    move(row, col);
+
+    for (;;) {
+        ch = getch();
+
+        if (ch == KB_ESC) {
+            move(row, 0);
+            clrtoeol();
+            break;
+        }
+        if (ch == '\n' || ch == KEY_ENTER || ch == '\r' || ch == 10) {
+            // Handle command
+            tmp_buf[buf_len] = '\0';  // Ensure null termination
+            cmd_parser(buf, tmp_buf, file_name, quit);
+            mvprintw(row, 0, "%s", tmp_buf);
+            break;
+        }
+
+        if (buf_len + 1 >= capacity) { // +1 for null terminator
+            size_t new_capacity = capacity * 2;
+            char *new_buf = realloc(tmp_buf, new_capacity);
+            if (!new_buf) {
+                free(tmp_buf);
+                return NORMAL;
+            }
+            tmp_buf = new_buf;
+            capacity = new_capacity;
+        }
+
+        tmp_buf[buf_len++] = ch;
+        tmp_buf[buf_len] = '\0';
+        mvprintw(row, 1, "%s", tmp_buf);
     }
-    return 0;
+
+    free(tmp_buf);
+    return NORMAL;
 }
 
 int main(int argc, char *argv[])
     // Argc hold num of args
     // argv is ptr to string passed in
-    // Argv[0] = dir from which main called
+    // Argv[0] = program name 
 {
     // TODO: Dynamcly allocate mem for path?
     TextBuffer buf = {0}; 
     char file_name[PATH_SIZE];
     Mode mode = NORMAL; // Start in normal mode
-    int ch;
     int quit = 0;
+    int ch;
 
     if (argc == 1) {
         // That means there are no arg passed in
@@ -332,29 +427,29 @@ int main(int argc, char *argv[])
     atexit(cleanup); // Register cleanup for when exit() called
 
     while (!quit) {
-        draw_ui(&buf, mode);
         render_text(&buf);
+        draw_ui(&buf, mode);
         refresh();
-        move(buf.row, buf.col); // Move cursor to start pos
-
-        ch = getch(); // Blocking
-        if (ch == KB_ESC) {
-            mode = NORMAL;
-            set_block_cursor();
-        }
+        move(buf.row, buf.col); // Move cursor
 
         switch (mode) {
             case NORMAL: 
+                ch = getch(); 
                 mode = handle_normal_mode(&buf, ch, mode);
                 break;
             case INSERT: 
+                ch = getch(); // Blocking waits for input
+                if (ch == KB_ESC) {
+                    mode = NORMAL;
+                    set_block_cursor();
+                    break;
+                }
                 handle_insert_mode(&buf, ch);
                 break;
             case COMMAND:
-                quit = handle_command_mode(&buf, ch, file_name, quit);
+                mode = handle_command_mode(&buf, ch, file_name, &quit);
                 break;
         }
-        move(buf.row, buf.col);
     }
 
 
