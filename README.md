@@ -31,8 +31,12 @@ make
 
 ## History 
 
+###  [line_nums + correct hjkl motions](https://github.com/Abishevs/ffedit/commit/f600ef7055a56ba037b9e9307c0b1a5a4a5452ea)
+![](https://github.com/Abishevs/ffedit/blob/a7c111778732ce86b4714ed836b7627319f05008/static/ffedit2.gif)
+
 ###  [First working version](https://github.com/Abishevs/ffedit/commit/322926b2362d3e16c83a17ebc3fcb4fccbf91d94)
 ![](https://github.com/Abishevs/ffedit/blob/322926b2362d3e16c83a17ebc3fcb4fccbf91d94/static/ffedit1.gif)
+
 
 ## Usage
 
