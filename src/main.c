@@ -1,4 +1,4 @@
-#include <stdio.h>
+include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ncurses.h>
@@ -14,11 +14,27 @@ typedef struct {
     char *data;         // Ptr to the array of characters
     size_t length;      // Current length of text
     size_t capacity;    // Maximum capacity before resizing
-    size_t col;      // Current cursor position
+                        
+    size_t vec_ptr;     // Cursor pos in buffer
+    size_t col;
+    size_t tmp_col;     // For saving col
+
     size_t row;
-                        // COL
-    size_t num_lines;   // ROW, 
+    size_t num_lines;
+
 } TextBuffer;
+
+typedef struct {
+    char *str;
+    size_t len;
+    int left; // Left or right side?
+} StatusBlock;
+
+typedef struct {
+    StatusBlock status_blocks; // Vec
+    size_t num_blocks;
+    size_t capacity;
+} StatusLine;
 
 /*  Utilis */
 int get_last_row()
@@ -127,19 +143,17 @@ void render_text(TextBuffer *buf)
             row++;
             col = 0; // Reset column at newline
             buf->num_lines++;
-        } else {
+        } else if (row < LINES - 2) {
             mvaddch(row, col, buf->data[i]);  // Draw character
             col++;
             if (col >= COLS) { // Wrap to next line if screen width is exceeded
                 row++;
                 col = 0;
             }
-            if (row >= LINES - 2) {
-                break;
-            }
         }
     }
 }
+
 
 int get_char_offset(TextBuffer *buf)
 {
@@ -151,35 +165,38 @@ int get_char_offset(TextBuffer *buf)
         }
         chars++;
     }
+
+    buf->vec_ptr = chars + buf->col;
     return chars;
 }
 
 int delete_char(TextBuffer *buf) 
 {
-    size_t index = buf->col + get_char_offset(buf);
-
-    if (buf->length == 0 ) {
+    if (buf->length == 0 || buf->col + get_char_offset(buf) == 0) {
         return 0; // Nothing to delete
     } 
 
-    char *tmp_ptr = realloc(buf->data, buf->capacity - 1);
-    if (tmp_ptr == NULL) {
-        fprintf(stdin, "Failed to reallocate memory");
-    }
-    buf->data = tmp_ptr;
-    buf->capacity--;
+    size_t index = buf->col + get_char_offset(buf);
 
     if (index > 0) {
+        /* Shift characters left */
         memmove(&buf->data[index - 1], &buf->data[index], buf->length - index);
     }
 
-
-    buf->data[index] = buf->data[index + 1]; //Overwrite cur char with next
-                                             //char
-
     buf->length--;
+
+    /* Shrink memory only if buffer is large enough */
+    if (buf->length < buf->capacity / 2) {
+        char *tmp_ptr = realloc(buf->data, buf->length);
+        if (tmp_ptr) {
+            buf->data = tmp_ptr;
+            buf->capacity = buf->length; // Adjust capacity correctly
+        }
+    }
+
     return 1;
 }
+
 
 int insert_char(TextBuffer *buf, char ch)
 {  
@@ -242,7 +259,7 @@ void draw_ui(TextBuffer *buf, Mode mode)
         exit(1);
     }
     int row_col_len;
-    row_col_len = sprintf(row_col_str, "%zu:%zu", buf->row, buf->col);
+    row_col_len = sprintf(row_col_str, "%zu:%zu", buf->row + 1, buf->col + 1);
 
     if (row_col_len > 3) {
         row_col_str = realloc(row_col_str, row_col_len + 1); //+1 NULL terminator
@@ -284,34 +301,87 @@ void draw_ui(TextBuffer *buf, Mode mode)
 
 Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
 {
+    int tmp_col = buf->col;
+    buf->col = 0;
+
+    get_char_offset(buf);
+
+    int cur_line_len = 0;
+    int next_line_len = 0;
+    int index = buf->vec_ptr;
+    int lines = 2;
+
+    while (lines > 0){
+        if (buf->data[index] == '\n'){
+            lines--;
+            index++;
+            continue;
+        } else if (buf->data[index] == '\0'){
+            break; // End of buf 
+        }
+
+        if (lines == 2) {
+            cur_line_len++;
+        } else next_line_len++; 
+        index++;
+    }
+
+    index = buf->vec_ptr - 2;
+    int prev_line_len = 0;
+    while (buf->data[index] != '\n' && index > 0) {
+        prev_line_len++;
+        index--;
+    }
+
+    if (cur_line_len > 0) cur_line_len--;
+    if (next_line_len > 0) next_line_len--;
+
+    buf->col = tmp_col;
+
+    move(LINES - 1, 0);
+    clrtoeol();
+    mvprintw(LINES - 1, 0, "prev: %d Cur:%d Next: %d",
+            prev_line_len, cur_line_len, next_line_len);
+
+
     if (ch == KB_i) {
         set_thin_cursor();
         return INSERT;
     } else if ( ch == ':' ) {
         return COMMAND;
+
     } else if (ch == 'h') { // Move left
-        if (buf->col > 0) {
-            buf->col--; // Ensure we don't go out of bounds
-        }
+        if (buf->col > 0) buf->col--; 
 
     } else if (ch == 'l') { // Move right
-        if (buf->col < COLS - 1) {
-            buf->col++; // Ensure we stay within screen width
-        }
+        if (buf->col < COLS - 1 && buf->col < cur_line_len)  buf->col++; 
 
     } else if (ch == 'j') { // Move down
-        if (buf->row + 1 < buf->num_lines ) buf->row++; // Ensure we stay within Status
-                                                        // TODO: find next \n then go col
+        if (buf->row + 1 < LINES - 2 ) {
+            if ( buf->col > next_line_len) {
+                buf->tmp_col = buf->col;
+                buf->col = next_line_len;
+            } else if ( buf->tmp_col < next_line_len) {
+                buf->col = buf->tmp_col;
+            }
+            buf->row++; 
+        }
 
     } else if (ch == 'k') { // Move up
-        if (buf->row > 0) buf->row--; // Ensure we don't go above the top
-                                      // TODO: find prev \n then go col
+        if (buf->row > 0) {
+            if ( buf->col > prev_line_len) {
+                buf->tmp_col = buf->col;
+                buf->col = prev_line_len;
+            } else if ( buf->tmp_col < prev_line_len) {
+                buf->col = buf->tmp_col;
+            }
+            buf->row--; 
+        }
     }
 
     return mode;
 
-}
-
+     }
 void handle_insert_mode(TextBuffer *buf, int ch)
 {
     if (ch == '\n' || ch == KEY_ENTER || ch == '\r' || ch == 10) {
@@ -324,12 +394,23 @@ void handle_insert_mode(TextBuffer *buf, int ch)
                 delete_char(buf);
                 buf->col--;
             } else if (buf->row > 0) {
+
+                /* Number of chars in previous line excluding '\n' */
+                int chars = 0;
+                int index = get_char_offset(buf) - 1;
+
+                /* Calc count of chars in prev line excluding \n */
+                while (index - 1 >= 0 && buf->data[index - 1] != '\n') {
+                    chars++;
+                    index--;
+                }
+                /* Delete the character */
                 delete_char(buf);
-                buf->col = 0;
+
+                /* Update cursor position */
+                buf->col = chars;
                 buf->row--;
-                // TODO: calc the right Col pos
-                // when deleting a lankline to jmp
-                // to correct prev line last col
+
 
             }
         } else {
@@ -401,6 +482,11 @@ Mode handle_command_mode(TextBuffer *buf, int ch, const char *file_name, int *qu
     return NORMAL;
 }
 
+WINDOW *resize_pad(WINDOW *old_pad, size_t num_lines) {
+    if (old_pad) delwin(old_pad);  // Delete old pad if it exists
+    return newpad(num_lines > LINES ? num_lines : LINES, PAD_WIDTH);
+}
+
 int main(int argc, char *argv[])
     // Argc hold num of args
     // argv is ptr to string passed in
@@ -423,6 +509,13 @@ int main(int argc, char *argv[])
     build_path(file_name, argv[1]);
     load_file_into_buffer(file_name, &buf);
     setup_terminal();
+
+    WINDOW *pad = resize_pad(NULL, buf.num_lines);
+    if (!pad) {
+        endwin();
+        printf("Failed to create pad\n");
+        return 1;
+    }
 
     atexit(cleanup); // Register cleanup for when exit() called
 
