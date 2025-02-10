@@ -1,9 +1,11 @@
-include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
+
 #include <ncurses.h>
 
 #define PATH_SIZE 256
+#define PAD_WIDTH 100
 
 #define KB_i 'i'
 #define KB_ESC 27
@@ -21,6 +23,7 @@ typedef struct {
 
     size_t row;
     size_t num_lines;
+    size_t pad_y;
 
 } TextBuffer;
 
@@ -128,32 +131,30 @@ void build_path(char *file_name, char *argv)
     printf("New string len: %d\n", length);
 }
 
-void render_text(TextBuffer *buf) 
+void count_num_lines(TextBuffer *buf)
 {
-    int row = 0, col = 0;
     buf->num_lines = 0;
-
-    for (int row = 0; row < LINES - 2; row++){
-            move(row, 0);
-            clrtoeol();
-    }
-    
     for (size_t i = 0; i < buf->length; i++) {
         if (buf->data[i] == '\n') {
-            row++;
-            col = 0; // Reset column at newline
             buf->num_lines++;
-        } else if (row < LINES - 2) {
-            mvaddch(row, col, buf->data[i]);  // Draw character
-            col++;
-            if (col >= COLS) { // Wrap to next line if screen width is exceeded
-                row++;
-                col = 0;
-            }
         }
     }
 }
+void render_text(WINDOW *pad, TextBuffer *buf) {
+    werase(pad); //Clear screen
+                 
+    int row = 0, col = 0;
 
+    for (size_t i = 0; i < buf->length; i++) {
+        if (buf->data[i] == '\n') {
+            row++;
+            col = 0;
+        } else {
+            mvwaddch(pad, row, col, buf->data[i]);
+            col++;
+        }
+    }
+}
 
 int get_char_offset(TextBuffer *buf)
 {
@@ -236,7 +237,7 @@ void setup_terminal()
     keypad(stdscr, TRUE);
     scrollok(stdscr, FALSE); 
     set_escdelay(25);     
-    nodelay(stdscr, FALSE);
+    nodelay(stdscr, TRUE);
     clear();
 }
 
@@ -327,7 +328,8 @@ Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
     }
 
     index = buf->vec_ptr - 2;
-    int prev_line_len = 0;
+    int prev_line_len = 0; // Will be exactly the line len
+                           // Unlike cur and next
     while (buf->data[index] != '\n' && index > 0) {
         prev_line_len++;
         index--;
@@ -343,6 +345,8 @@ Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
     mvprintw(LINES - 1, 0, "prev: %d Cur:%d Next: %d",
             prev_line_len, cur_line_len, next_line_len);
 
+    int visible_height = LINES - 2;
+    int display_row = buf->row - buf->pad_y;
 
     if (ch == KB_i) {
         set_thin_cursor();
@@ -351,37 +355,66 @@ Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
         return COMMAND;
 
     } else if (ch == 'h') { // Move left
-        if (buf->col > 0) buf->col--; 
-
-    } else if (ch == 'l') { // Move right
-        if (buf->col < COLS - 1 && buf->col < cur_line_len)  buf->col++; 
-
-    } else if (ch == 'j') { // Move down
-        if (buf->row + 1 < LINES - 2 ) {
-            if ( buf->col > next_line_len) {
-                buf->tmp_col = buf->col;
-                buf->col = next_line_len;
-            } else if ( buf->tmp_col < next_line_len) {
-                buf->col = buf->tmp_col;
-            }
-            buf->row++; 
+        if (buf->col > 0) {
+            buf->col--; 
+            buf->tmp_col = buf->col;
         }
 
-    } else if (ch == 'k') { // Move up
-        if (buf->row > 0) {
-            if ( buf->col > prev_line_len) {
+    } else if (ch == 'l') { // Move right
+        if (buf->col < COLS - 1 && buf->col < cur_line_len) {
+            buf->col++; 
+            buf->tmp_col = buf->col;
+        }
+
+    } else if (ch == 'j') { // Move down
+        if (buf->row < buf->num_lines) {
+            buf->row++;
+
+            /* Longest line so far save it */
+            if ( buf->col > buf->tmp_col) {
                 buf->tmp_col = buf->col;
-                buf->col = prev_line_len;
-            } else if ( buf->tmp_col < prev_line_len) {
+            } 
+
+            if (buf->tmp_col >= next_line_len) {
+                buf->col = next_line_len;
+            } else {
                 buf->col = buf->tmp_col;
             }
-            buf->row--; 
+
+            display_row = buf->row - buf->pad_y;
+
+            if (display_row >= visible_height) {
+                buf->pad_y++;  // Move the pad view down
+            }
+        }
+    }  else if (ch == 'k') { // Move up
+        if (buf->row > 0) {  // If not at the first line
+            buf->row--;
+
+            /* Longest line so far save it */
+            if ( buf->col > buf->tmp_col) {
+                buf->tmp_col = buf->col;
+            } 
+
+            if (buf->tmp_col >= prev_line_len) {
+                buf->col = prev_line_len;
+            } else {
+                buf->col = buf->tmp_col;
+            }
+
+            display_row = buf->row - buf->pad_y;  // Recalculate visible row
+
+            // Scroll up only if cursor is at the top of the visible area
+            if (display_row < 0) {
+                buf->pad_y--;  // Move the pad view up
+            }
         }
     }
 
     return mode;
 
-     }
+}
+
 void handle_insert_mode(TextBuffer *buf, int ch)
 {
     if (ch == '\n' || ch == KEY_ENTER || ch == '\r' || ch == 10) {
@@ -482,8 +515,21 @@ Mode handle_command_mode(TextBuffer *buf, int ch, const char *file_name, int *qu
     return NORMAL;
 }
 
-WINDOW *resize_pad(WINDOW *old_pad, size_t num_lines) {
-    if (old_pad) delwin(old_pad);  // Delete old pad if it exists
+int number_length(int n) {
+    int len = 0;
+    if (n == 0) return 1; 
+
+    n = abs(n);
+    while (n > 0) {
+        n /= 10;
+        len++;
+    }
+    return len;
+}
+
+WINDOW *resize_pad(WINDOW *old_pad, size_t num_lines) 
+{
+    if (old_pad) delwin(old_pad);
     return newpad(num_lines > LINES ? num_lines : LINES, PAD_WIDTH);
 }
 
@@ -497,6 +543,8 @@ int main(int argc, char *argv[])
     char file_name[PATH_SIZE];
     Mode mode = NORMAL; // Start in normal mode
     int quit = 0;
+    int current_pad_height = buf.num_lines;
+    int display_row = 0;
     int ch;
 
     if (argc == 1) {
@@ -508,6 +556,9 @@ int main(int argc, char *argv[])
 
     build_path(file_name, argv[1]);
     load_file_into_buffer(file_name, &buf);
+    count_num_lines(&buf);
+
+
     setup_terminal();
 
     WINDOW *pad = resize_pad(NULL, buf.num_lines);
@@ -517,36 +568,76 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    WINDOW *side_win = newwin(LINES - 2, 3, 0, 0);
+    if (!side_win) {
+        endwin();
+        printf("Failed to create sidebar window\n");
+        return 1;
+    }
+
     atexit(cleanup); // Register cleanup for when exit() called
 
-    while (!quit) {
-        render_text(&buf);
-        draw_ui(&buf, mode);
-        refresh();
-        move(buf.row, buf.col); // Move cursor
+    int sidebar_len = number_length(buf.num_lines);
 
-        switch (mode) {
-            case NORMAL: 
-                ch = getch(); 
-                mode = handle_normal_mode(&buf, ch, mode);
-                break;
-            case INSERT: 
-                ch = getch(); // Blocking waits for input
-                if (ch == KB_ESC) {
-                    mode = NORMAL;
-                    set_block_cursor();
-                    break;
-                }
-                handle_insert_mode(&buf, ch);
-                break;
-            case COMMAND:
-                mode = handle_command_mode(&buf, ch, file_name, &quit);
-                break;
+    while (!quit) {
+        draw_ui(&buf, mode);
+        count_num_lines(&buf);
+        render_text(pad, &buf);
+        if (buf.num_lines > current_pad_height) {
+            pad = resize_pad(pad, buf.num_lines);
+            current_pad_height = buf.num_lines;
         }
+
+
+        werase(side_win);
+        for (int i = buf.pad_y; i < buf.pad_y + (LINES - 2) && i < buf.num_lines + 1; i++) {
+            // BUG: Reverse the line_num :D
+            mvwprintw(side_win, i - buf.pad_y, 0, "%d", i + 1);  // Line numbers
+        }
+        wrefresh(side_win);
+
+        display_row = buf.row - buf.pad_y;
+        if (display_row >= LINES - 2) display_row = LINES - 2;
+        if (display_row < 0) display_row = 0;
+
+
+        prefresh(pad, buf.pad_y, 0, 0, sidebar_len + 1, LINES - 2, COLS - 1);
+        move(display_row, buf.col + sidebar_len + 1);
+
+
+        if ( mode == COMMAND) {
+            nodelay(stdscr, FALSE);  
+            mode = handle_command_mode(&buf, ch, file_name, &quit);
+            nodelay(stdscr, TRUE);
+        } else {
+            ch = getch();
+            if (ch != ERR) {
+
+                switch (mode) {
+                    case NORMAL:
+                        mode = handle_normal_mode(&buf, ch, mode);
+                        break;
+                    case INSERT:
+                        if (ch == KB_ESC) {
+                            mode = NORMAL;
+                            set_block_cursor();
+                        } else {
+                            handle_insert_mode(&buf, ch);
+                        }
+                        break;
+                    case COMMAND:
+                        // Handled earlier
+                        break;
+                }
+
+            }
+        }
+        usleep(16666); // ~60 fps, 16.6...ms
     }
 
 
     /*  Clean up */
+    delwin(pad);
     cleanup();
     free(buf.data);
 
