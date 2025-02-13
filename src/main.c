@@ -300,7 +300,7 @@ void draw_ui(TextBuffer *buf, Mode mode)
 
 char *collect_command_sequence(int timeout_ms) 
 {
-    static char cmd_buffer[3] = {0};  // Store up to 2-key cmd + null terminator
+    static char cmd_buffer[3] = {0};  // Store up to 2-key cmds + null terminator
     int cmd_len = 0;
     int ch;
 
@@ -335,12 +335,17 @@ int get_row_len(TextBuffer *buf, size_t row)
 {
     return 0;
 }
+
+void move_cursor()
+{
+}
+
 Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
 {
     int tmp_col = buf->col;
-    buf->col = 0;
+    buf->col = 1;
 
-    get_char_offset(buf); // Update vec_ptr
+    int offset = get_char_offset(buf); // Update vec_ptr
 
     int cur_line_len = 0;
     int next_line_len = 0;
@@ -372,45 +377,54 @@ Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
         index--;
     }
 
-    if (cur_line_len > 0) cur_line_len--;  // Rm '\n'
-    if (next_line_len > 0) next_line_len--;
+    // if (cur_line_len > 0) cur_line_len--;  // Rm '\n'
+    // if (next_line_len > 0) next_line_len--;
 
     buf->col = tmp_col;  // Move back to actual
                          // col
 
     char *cmd_buffer = collect_command_sequence(800);
 
-        if (strcmp(cmd_buffer, "gg") == 0) {
-            buf->row = 0;  // Move to first line
-            buf->pad_y = buf->row;
-        }
-        // If the first key might be part of a multi-key command,
-        // wait for a second key.
-        if (cmd_buffer[0] == 'g' && cmd_buffer[1] == 'g') {
-            buf->row = 0;  // Move to first line
-                           // continue;
-        }
+    if (strcmp(cmd_buffer, "gg") == 0) {
+        buf->row = 0;  // Move to first line
+        buf->pad_y = buf->row;
+    }
 
-        // **Handle Single-Key Commands Immediately**
-        if (cmd_buffer[0] == KB_i) {
+    switch (cmd_buffer[0]) {
+        case KB_i:
             set_thin_cursor();
             return INSERT;
-        } else if (cmd_buffer[0] == ':') {
+
+        case 'a':
+            buf->col++;
+            set_thin_cursor();
+            return INSERT;
+
+        case ':':
             return COMMAND;
-        } else if (cmd_buffer[0] == 'G') {
+
+        case 'G':
             buf->row = buf->num_lines - 1;
             buf->pad_y = buf->row - visible_height + 1;
-        } else if (cmd_buffer[0] == 'h') {  // Move left
+            break;
+
+        case 'h':
             if (buf->col > 0) {
                 buf->col--;
                 buf->tmp_col = buf->col;
             }
-        } else if (cmd_buffer[0] == 'l') {  // Move right
+            break;
+
+        case 'l':
             if (buf->col < COLS - 1 && buf->col < cur_line_len) {
                 buf->col++;
                 buf->tmp_col = buf->col;
             }
-        } else if (cmd_buffer[0] == 'j') {  // Move down
+            break;
+
+        case 'j':
+            // BUG: Col calc works sometimes?
+            // but sometimes jumps to col 0?
             if (buf->row < buf->num_lines) {
                 buf->row++;
 
@@ -419,7 +433,7 @@ Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
                     buf->tmp_col = buf->col;
                 }
 
-                if (buf->tmp_col >= next_line_len) {
+                if (buf->tmp_col > next_line_len) {
                     buf->col = next_line_len;
                 } else {
                     buf->col = buf->tmp_col;
@@ -431,7 +445,11 @@ Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
                     buf->pad_y++;  // Move the pad view down
                 }
             }
-        } else if (cmd_buffer[0] == 'k') {  // Move up
+            break;
+
+        case 'k':
+            // BUG: when going up, doesnt change col correctly
+            // goes out of bounds... or jumps to col 0 mhm
             if (buf->row > 0) {  // If not at the first line
                 buf->row--;
 
@@ -440,7 +458,7 @@ Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
                     buf->tmp_col = buf->col;
                 }
 
-                if (buf->tmp_col >= prev_line_len) {
+                if (buf->tmp_col >= prev_line_len - 1) {
                     buf->col = prev_line_len;
                 } else {
                     buf->col = buf->tmp_col;
@@ -453,7 +471,9 @@ Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
                     buf->pad_y--;  // Move the pad view up
                 }
             }
-        }
+            break;
+    }
+
     return mode;
 
 }
@@ -461,15 +481,19 @@ Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
 Mode handle_insert_mode(TextBuffer *buf, int ch)
 {
     ch = getch();
-    if ( ch == KB_ESC ) {
+    switch (ch) {
+        case KB_ESC:
         return NORMAL;
-    }
-    if (ch == '\n' || ch == KEY_ENTER || ch == '\r' || ch == 10) {
-        insert_char(buf, ch);
-        buf->row++;
-        buf->col = 0;
-    } else {
-        if ( ch == KEY_BACKSPACE || ch == 263 ) {
+
+        case '\n':
+        case KEY_ENTER:
+        case '\r':
+            insert_char(buf, ch);
+            buf->row++;
+            buf->col = 0;
+            return INSERT;
+
+        case KEY_BACKSPACE:
             if (buf->col > 0) {
                 delete_char(buf);
                 buf->col--;
@@ -493,12 +517,14 @@ Mode handle_insert_mode(TextBuffer *buf, int ch)
 
 
             }
-        } else {
+            return INSERT;
+
+        default:
             insert_char(buf, ch);
             buf->col++;
-        }
+            return INSERT;
     }
-    return INSERT;
+    // return INSERT;
 }
 
 void cmd_parser(TextBuffer *buf, char *tmp_buf, const char *file_name, int *quit)
@@ -652,8 +678,8 @@ int main(int argc, char *argv[])
 
 
         prefresh(pad, buf.pad_y, 0, 0, sidebar_len + 1, get_last_row(), COLS - 1);
-        move(display_row, buf.col + sidebar_len + 1);
 
+        move(display_row, buf.col + sidebar_len + 1);
 
         switch (mode) {
             case NORMAL:
@@ -670,7 +696,6 @@ int main(int argc, char *argv[])
 
     }
     
-
 
     /*  Clean up */
     delwin(pad);
