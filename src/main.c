@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
@@ -26,18 +27,6 @@ typedef struct {
     size_t pad_y;
 
 } TextBuffer;
-
-typedef struct {
-    char *str;
-    size_t len;
-    int left; // Left or right side?
-} StatusBlock;
-
-typedef struct {
-    StatusBlock status_blocks; // Vec
-    size_t num_blocks;
-    size_t capacity;
-} StatusLine;
 
 /*  Utilis */
 int get_last_row()
@@ -156,6 +145,23 @@ void render_text(WINDOW *pad, TextBuffer *buf) {
     }
 }
 
+void grow_data_capacity(TextBuffer *buf)
+{
+    /* Shrink memory only if buffer is large enough */
+    if (buf->length < buf->capacity / 2) {
+        char *tmp_ptr = realloc(buf->data, buf->length);
+        if (tmp_ptr) {
+            buf->data = tmp_ptr;
+            buf->capacity = buf->length; // Adjust capacity correctly
+        }
+    }
+}
+
+void shift_data(TextBuffer *buf, int index, int offset)
+{
+    memmove(&buf->data[index + offset], &buf->data[index], buf->length - index);
+}
+
 int get_char_offset(TextBuffer *buf)
 {
     int prev_lines = 0;
@@ -181,19 +187,11 @@ int delete_char(TextBuffer *buf)
 
     if (index > 0) {
         /* Shift characters left */
-        memmove(&buf->data[index - 1], &buf->data[index], buf->length - index);
+        shift_data(buf, index, -1);
     }
 
     buf->length--;
-
-    /* Shrink memory only if buffer is large enough */
-    if (buf->length < buf->capacity / 2) {
-        char *tmp_ptr = realloc(buf->data, buf->length);
-        if (tmp_ptr) {
-            buf->data = tmp_ptr;
-            buf->capacity = buf->length; // Adjust capacity correctly
-        }
-    }
+    grow_data_capacity(buf);
 
     return 1;
 }
@@ -213,15 +211,15 @@ int insert_char(TextBuffer *buf, char ch)
     char *tmp_ptr = realloc(buf->data, buf->capacity + 1);
     if (tmp_ptr == NULL) {
         fprintf(stdin, "Failed to reallocate memory");
+        exit(1);
     }
     buf->data = tmp_ptr;
     buf->capacity++;
-
         
     size_t index = buf->col+get_char_offset(buf);
-
-    memmove(&buf->data[index + 1], &buf->data[index], buf->length - index);
-
+    // if (index >= 0) {
+        shift_data(buf, index, 1);
+    // }
 
     buf->data[index] = ch;
     buf->length++;
@@ -237,7 +235,7 @@ void setup_terminal()
     keypad(stdscr, TRUE);
     scrollok(stdscr, FALSE); 
     set_escdelay(25);     
-    nodelay(stdscr, TRUE);
+    nodelay(stdscr, FALSE);
     clear();
 }
 
@@ -300,17 +298,56 @@ void draw_ui(TextBuffer *buf, Mode mode)
     free(row_col_str);
 }
 
+char *collect_command_sequence(int timeout_ms) 
+{
+    static char cmd_buffer[3] = {0};  // Store up to 2-key cmd + null terminator
+    int cmd_len = 0;
+    int ch;
+
+    cmd_buffer[0] = '\0';  // Clear buffer
+
+    ch = getch();  
+    if (ch != ERR) {
+        cmd_buffer[cmd_len++] = ch;
+        cmd_buffer[cmd_len] = '\0';
+        
+        // If it's a single-key command, return immediately
+        if (cmd_buffer[0] != 'g') {
+            return cmd_buffer;
+        }
+    }
+
+    timeout(timeout_ms);  // Set a timeout on getch()
+    ch = getch();  
+    if (ch != ERR) {
+        cmd_buffer[cmd_len++] = ch;
+        cmd_buffer[cmd_len] = '\0';
+    }
+
+    timeout(-1);
+    
+    return cmd_buffer;
+
+}
+
+
+int get_row_len(TextBuffer *buf, size_t row)
+{
+    return 0;
+}
 Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
 {
     int tmp_col = buf->col;
     buf->col = 0;
 
-    get_char_offset(buf);
+    get_char_offset(buf); // Update vec_ptr
 
     int cur_line_len = 0;
     int next_line_len = 0;
     int index = buf->vec_ptr;
     int lines = 2;
+    int visible_height = get_last_row();
+    int display_row = buf->row - buf->pad_y;
 
     while (lines > 0){
         if (buf->data[index] == '\n'){
@@ -335,88 +372,98 @@ Mode handle_normal_mode(TextBuffer *buf, int ch, Mode mode)
         index--;
     }
 
-    if (cur_line_len > 0) cur_line_len--;
+    if (cur_line_len > 0) cur_line_len--;  // Rm '\n'
     if (next_line_len > 0) next_line_len--;
 
-    buf->col = tmp_col;
+    buf->col = tmp_col;  // Move back to actual
+                         // col
 
-    move(LINES - 1, 0);
-    clrtoeol();
-    mvprintw(LINES - 1, 0, "prev: %d Cur:%d Next: %d",
-            prev_line_len, cur_line_len, next_line_len);
+    char *cmd_buffer = collect_command_sequence(800);
 
-    int visible_height = LINES - 2;
-    int display_row = buf->row - buf->pad_y;
-
-    if (ch == KB_i) {
-        set_thin_cursor();
-        return INSERT;
-    } else if ( ch == ':' ) {
-        return COMMAND;
-
-    } else if (ch == 'h') { // Move left
-        if (buf->col > 0) {
-            buf->col--; 
-            buf->tmp_col = buf->col;
+        if (strcmp(cmd_buffer, "gg") == 0) {
+            buf->row = 0;  // Move to first line
+            buf->pad_y = buf->row;
+        }
+        // If the first key might be part of a multi-key command,
+        // wait for a second key.
+        if (cmd_buffer[0] == 'g' && cmd_buffer[1] == 'g') {
+            buf->row = 0;  // Move to first line
+                           // continue;
         }
 
-    } else if (ch == 'l') { // Move right
-        if (buf->col < COLS - 1 && buf->col < cur_line_len) {
-            buf->col++; 
-            buf->tmp_col = buf->col;
-        }
-
-    } else if (ch == 'j') { // Move down
-        if (buf->row < buf->num_lines) {
-            buf->row++;
-
-            /* Longest line so far save it */
-            if ( buf->col > buf->tmp_col) {
+        // **Handle Single-Key Commands Immediately**
+        if (cmd_buffer[0] == KB_i) {
+            set_thin_cursor();
+            return INSERT;
+        } else if (cmd_buffer[0] == ':') {
+            return COMMAND;
+        } else if (cmd_buffer[0] == 'G') {
+            buf->row = buf->num_lines - 1;
+            buf->pad_y = buf->row - visible_height + 1;
+        } else if (cmd_buffer[0] == 'h') {  // Move left
+            if (buf->col > 0) {
+                buf->col--;
                 buf->tmp_col = buf->col;
-            } 
-
-            if (buf->tmp_col >= next_line_len) {
-                buf->col = next_line_len;
-            } else {
-                buf->col = buf->tmp_col;
             }
-
-            display_row = buf->row - buf->pad_y;
-
-            if (display_row >= visible_height) {
-                buf->pad_y++;  // Move the pad view down
-            }
-        }
-    }  else if (ch == 'k') { // Move up
-        if (buf->row > 0) {  // If not at the first line
-            buf->row--;
-
-            /* Longest line so far save it */
-            if ( buf->col > buf->tmp_col) {
+        } else if (cmd_buffer[0] == 'l') {  // Move right
+            if (buf->col < COLS - 1 && buf->col < cur_line_len) {
+                buf->col++;
                 buf->tmp_col = buf->col;
-            } 
-
-            if (buf->tmp_col >= prev_line_len) {
-                buf->col = prev_line_len;
-            } else {
-                buf->col = buf->tmp_col;
             }
+        } else if (cmd_buffer[0] == 'j') {  // Move down
+            if (buf->row < buf->num_lines) {
+                buf->row++;
 
-            display_row = buf->row - buf->pad_y;  // Recalculate visible row
+                /* Longest line so far save it */
+                if (buf->col > buf->tmp_col) {
+                    buf->tmp_col = buf->col;
+                }
 
-            // Scroll up only if cursor is at the top of the visible area
-            if (display_row < 0) {
-                buf->pad_y--;  // Move the pad view up
+                if (buf->tmp_col >= next_line_len) {
+                    buf->col = next_line_len;
+                } else {
+                    buf->col = buf->tmp_col;
+                }
+
+                display_row = buf->row - buf->pad_y;
+
+                if (display_row >= visible_height) {
+                    buf->pad_y++;  // Move the pad view down
+                }
+            }
+        } else if (cmd_buffer[0] == 'k') {  // Move up
+            if (buf->row > 0) {  // If not at the first line
+                buf->row--;
+
+                /* Longest line so far save it */
+                if (buf->col > buf->tmp_col) {
+                    buf->tmp_col = buf->col;
+                }
+
+                if (buf->tmp_col >= prev_line_len) {
+                    buf->col = prev_line_len;
+                } else {
+                    buf->col = buf->tmp_col;
+                }
+
+                display_row = buf->row - buf->pad_y;  // Recalculate visible row
+
+                // Scroll up only if cursor is at the top of the visible area
+                if (display_row < 0) {
+                    buf->pad_y--;  // Move the pad view up
+                }
             }
         }
-    }
-
     return mode;
 
 }
 
-void handle_insert_mode(TextBuffer *buf, int ch)
+Mode handle_insert_mode(TextBuffer *buf, int ch)
 {
+    ch = getch();
+    if ( ch == KB_ESC ) {
+        return NORMAL;
+    }
     if (ch == '\n' || ch == KEY_ENTER || ch == '\r' || ch == 10) {
         insert_char(buf, ch);
         buf->row++;
@@ -451,19 +498,22 @@ void handle_insert_mode(TextBuffer *buf, int ch)
             buf->col++;
         }
     }
+    return INSERT;
 }
 
 void cmd_parser(TextBuffer *buf, char *tmp_buf, const char *file_name, int *quit)
 {
-        if ( tmp_buf[0] == 'w' && tmp_buf[1] == 'q' ){
+    size_t buf_len;
+    if ( strcmp(tmp_buf, "wq") == 0 ){
             save_file(buf, file_name);
            *quit = 1;
-        } else if (tmp_buf[0] == 'q' ) {
+        } else if (strcmp(tmp_buf, "q") == 0) {
             *quit = 1;
-        } else if (tmp_buf[0] == 'w' ) {
+        } else if (strcmp(tmp_buf, "w") == 0) {
             save_file(buf, file_name);
-            int str_len = sprintf(tmp_buf,"'%s', %zuL, %zuB written",file_name, buf->num_lines, buf->length);
-            //WARN: Reallocate aka look at size of the str
+             buf_len = sprintf(tmp_buf,"'%s', %zuL, %zuB written",file_name, buf->num_lines, buf->length);
+        } else {
+            buf_len = sprintf(tmp_buf,"Not an editor command");
         }
 }
 
@@ -568,8 +618,8 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    WINDOW *side_win = newwin(LINES - 2, 3, 0, 0);
-    if (!side_win) {
+    WINDOW *sidebar = newwin(get_last_row(), 3, 0, 0);
+    if (!sidebar) {
         endwin();
         printf("Failed to create sidebar window\n");
         return 1;
@@ -583,57 +633,43 @@ int main(int argc, char *argv[])
         draw_ui(&buf, mode);
         count_num_lines(&buf);
         render_text(pad, &buf);
+
         if (buf.num_lines > current_pad_height) {
             pad = resize_pad(pad, buf.num_lines);
             current_pad_height = buf.num_lines;
         }
 
 
-        werase(side_win);
-        for (int i = buf.pad_y; i < buf.pad_y + (LINES - 2) && i < buf.num_lines + 1; i++) {
-            // BUG: Reverse the line_num :D
-            mvwprintw(side_win, i - buf.pad_y, 0, "%d", i + 1);  // Line numbers
+        werase(sidebar);
+        for (int i = buf.pad_y; i < buf.pad_y + (get_last_row()) && i < buf.num_lines + 1; i++) {
+            mvwprintw(sidebar, i - buf.pad_y, 0, "%d", i + 1);  // Line numbers
         }
-        wrefresh(side_win);
+        wrefresh(sidebar);
 
         display_row = buf.row - buf.pad_y;
-        if (display_row >= LINES - 2) display_row = LINES - 2;
+        if (display_row >= get_last_row()) display_row = get_last_row();
         if (display_row < 0) display_row = 0;
 
 
-        prefresh(pad, buf.pad_y, 0, 0, sidebar_len + 1, LINES - 2, COLS - 1);
+        prefresh(pad, buf.pad_y, 0, 0, sidebar_len + 1, get_last_row(), COLS - 1);
         move(display_row, buf.col + sidebar_len + 1);
 
 
-        if ( mode == COMMAND) {
-            nodelay(stdscr, FALSE);  
-            mode = handle_command_mode(&buf, ch, file_name, &quit);
-            nodelay(stdscr, TRUE);
-        } else {
-            ch = getch();
-            if (ch != ERR) {
-
-                switch (mode) {
-                    case NORMAL:
-                        mode = handle_normal_mode(&buf, ch, mode);
-                        break;
-                    case INSERT:
-                        if (ch == KB_ESC) {
-                            mode = NORMAL;
-                            set_block_cursor();
-                        } else {
-                            handle_insert_mode(&buf, ch);
-                        }
-                        break;
-                    case COMMAND:
-                        // Handled earlier
-                        break;
-                }
-
-            }
+        switch (mode) {
+            case NORMAL:
+                set_block_cursor();
+                mode = handle_normal_mode(&buf, ch, mode);
+                break;
+            case INSERT:
+                mode = handle_insert_mode(&buf, ch);
+                break;
+            case COMMAND:
+                mode = handle_command_mode(&buf, ch, file_name, &quit);
+                break;
         }
-        usleep(16666); // ~60 fps, 16.6...ms
+
     }
+    
 
 
     /*  Clean up */
